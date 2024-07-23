@@ -12,10 +12,10 @@ from PIL import Image
 # for the following imports to work, you must add the repository to your PYTHONPATH (see README)
 import geometry_utils as geo
 import image_utils
-from mkid_analysis.make_capacitor_template import draw_capacitor_lines
-from mkid_analysis.mkid_mapping_utils import image_num_to_capacitor_info
-import mkid_analysis.analysis_params as aparams
-import mkid_analysis.plot_functions as pf
+from spt4.make_capacitor_template import draw_capacitor_lines
+from spt4.spt4_mapping_utils import image_num_to_capacitor_info
+import spt4.analysis_params as aparams
+import spt4.plot_functions as pf
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -50,10 +50,9 @@ pf.save_dir = args.save_dir
 pf.index = args.index
 
 # probabilistic Hough transform has an element of randomness, set seed to make results reproducible
-if args.seed != -1:
-    np.random.seed(args.seed)
-else:
-    np.random.seed(args.index)
+if args.seed == -1:
+    args.seed = args.index
+np.random.seed(args.seed)
 
 # get parameters from analysis_params.py
 if args.magnification == 50: # here for historical reasons, shouldn't actually be using 50x images
@@ -90,10 +89,12 @@ imshape = (image.shape[1], image.shape[0])
 xx = x/2
 yy = y/2
 pf.x = x; pf.y = y
+cutoff_x = (x - cutout_size) // 2
+cutoff_y = (y - cutout_size) // 2
 
 # filter, skeletonize image
-image = filters.gaussian(image, sigma=1)
-edges = filters.scharr(image)
+edges = filters.gaussian(image, sigma=1)
+edges = filters.scharr(edges)
 edges /= np.max(edges)
 e = deepcopy(edges)
 e[e<args.threshold] = 0
@@ -102,10 +103,13 @@ skeleton = morphology.skeletonize(e)
 # try to get rid of small dust motes
 skeleton = morphology.remove_small_objects(skeleton, 10, connectivity=2)
 
+thresh_image = filters.threshold_otsu(image[y//2-4000:y//2+4000, x//2-4000:x//2+4000])
+binary = image > thresh_image
+
 # find general bolometer island location in image
 # first get orientation angle up to 90-degree modulus
 lines = transform.probabilistic_hough_line(skeleton[y//2-y//line_frac:y//2+y//line_frac, x//2-x//line_frac:x//2+x//line_frac],
-                                           threshold=hough_thresh, line_length=min_length, line_gap=gap, theta=angs)
+                                           threshold=hough_thresh, line_length=min_length, line_gap=gap, theta=angs, seed=args.seed)
 ang, km = geo.hough_lines_to_angle(lines)
 
 # create template of inductor geometry in each of the four possible orientations
@@ -149,10 +153,9 @@ pf.x_loc = x_loc; pf.y_loc = y_loc
 
 # generate pixel locations of flood fill seeds. we will do this again later after we refine
 # the angle, but we need this initial estimate to actually *get* that refined angle; the
-# cross-correlation works a lot better if things are filled in than if it's working on a skeleton
-# XXX: Why not just do this on binarized image?
-cutoff_x = (x - cutout_size) // 2
-cutoff_y = (y - cutout_size) // 2
+# cross-correlation works a lot better if things are filled in than if it's working on a skeleton.
+# technically, we could get around this by using draw.polygon below where we are drawing the
+# template, but it's much faster to use draw.line and just flood-fill the template in.
 seed_image_locs = []
 for pt in seed_locs:
     new_pt = geo.rotate_point(pt, ang + rot_angles[orientation], scaling, scaling, (xx, yy))
@@ -165,24 +168,7 @@ ang_spread = np.linspace(-1.*(np.pi/180.), 1.*(np.pi/180.), 100)
 extrema = {'left':[4043], 'right':[4068], 'vertical':[3139,11633]}
 plot_lines = {}
 xcorrs = []
-skel = deepcopy(skeleton)
-# Cut off inductors so flood fill doesn't go to capacitors
-for obj in ['left', 'right', 'vertical']:
-    edge_lines = pk.load(open(args.aux_dir + '%s_meander_physical_units.pkl'%(obj), 'rb'))
-    for ind in extrema[obj]:
-        # pad line a bit to make sure there are no gaps
-        l = geo.lengthen_line_segment(edge_lines[ind], 50.0*microns_per_pixel_x) # doesn't matter which scaling used, use x
-        p1 = geo.rotate_point(l[0], ang + rot_angles[orientation], scaling/microns_per_pixel_x,
-                              scaling/microns_per_pixel_y, (xx+diff[0], yy+diff[1]))
-        p2 = geo.rotate_point(l[1], ang + rot_angles[orientation], scaling/microns_per_pixel_x,
-                              scaling/microns_per_pixel_y, (xx+diff[0], yy+diff[1]))
-        rr, cc = draw.line(int(np.round(p1[1])), int(np.round(p1[0])),
-                           int(np.round(p2[1])), int(np.round(p2[0])))
-        skel[rr, cc] = 1
 
-skel = skel[cutoff_y:-cutoff_y,cutoff_x:-cutoff_x]
-segmentation.flood_fill(skel, seed_image_locs[0][::-1], True, connectivity=1, in_place=True)
-segmentation.flood_fill(skel, seed_image_locs[1][::-1], True, connectivity=1, in_place=True)
 for delta in ang_spread:
     temp = np.zeros(image.shape)
     new_ang = delta+ang+rot_angles[orientation]
@@ -200,7 +186,7 @@ for delta in ang_spread:
     temp = temp[cutoff_y:-cutoff_y,cutoff_x:-cutoff_x]
     for ind in range(3):
         segmentation.flood_fill(temp, seed_image_locs[ind][::-1], True, connectivity=1, in_place=True)
-    xcorrs.append(image_utils.xcorr_same_size(temp, skel))
+    xcorrs.append(image_utils.xcorr_same_size(temp, binary[cutoff_y:-cutoff_y,cutoff_x:-cutoff_x]))
 
 delta_ang = ang_spread[np.argmax(xcorrs)]
 final_rot_angle = delta_ang + ang + rot_angles[orientation]
@@ -404,18 +390,6 @@ for i in range(2):
                            int(np.round(p2[1])), int(np.round(p2[0])))
         new_skel[rr, cc] = 1
 
-    # Flood fill algorithm to find breaks
-    for j, pt in enumerate(cap_seed_locs):
-        new_pt = geo.rotate_point(pt, seed_angs[j], scaling/microns_per_pixel_x,
-                                  scaling/microns_per_pixel_y, (xx, yy))
-        new_pt = np.round(new_pt + diff)
-        new_pt = np.array(new_pt, dtype=int)
-        seed_image_locs.append((new_pt[0], new_pt[1]))
-    filled = segmentation.flood_fill(new_skel, seed_image_locs[0][::-1], True, connectivity=1)
-    half_filled = [deepcopy(filled)]
-    half_filled.append(segmentation.flood_fill(new_skel, seed_image_locs[1][::-1], True, connectivity=1))
-    segmentation.flood_fill(filled, seed_image_locs[1][::-1], True, connectivity=1, in_place=True)
-
     cap_rotated_template_arr = np.zeros(image.shape)
     filled_nums = [[], []]; total_nums = [[], []]    
     for j in range(2): # iterate over two sides of capacitor
@@ -428,27 +402,29 @@ for i in range(2):
         rr, cc = draw.polygon(pts[:,1], pts[:,0], cap_rotated_template_arr.shape)
         temp[rr, cc] = 1
         cap_rotated_template_arr[temp==1] = 1
-        temp = morphology.skeletonize(temp)
-        filled_nums[0].append(np.sum(half_filled[j][temp==1]))
-        total_nums[0].append(np.sum(temp))
-
-        # count filled pixel fraction in side we're leaving alone (in order to see if there's a short)
-        filled_nums[1].append(np.sum(half_filled[j-1][temp==1]))
-        total_nums[1].append(np.sum(temp))
-        del temp
 
     cap_rotated_template_arr_skel = morphology.skeletonize(cap_rotated_template_arr)
-    pf.capacitor_template_fit(half_filled, cap_rotated_template_arr_skel, seed_image_locs, filled_nums, total_nums, adjustment=False)
+    #pf.capacitor_template_fit(half_filled, cap_rotated_template_arr_skel, seed_image_locs, filled_nums, total_nums, adjustment=False)
 
     # capacitor template needs to be shifted slightly to line up better with image; find best translation here
     cap_rotated_template_arr = cap_rotated_template_arr[min_y:max_y, min_x:max_x]
     search_area = 20
-    # XXX: MY THESIS SAYS THIS XCORR IS COMPUTED BETWEEN THE TEMPLATE AND THE BINARIZED IMAGE, NOT THE FILLED IMAGE.
-    # IT'S PROBABLY BETTER TO USE THAT BINARIZED IMAGE. SOMETHING TO CHANGE BEFORE WE PUBLISH THIS.
-    xcorrs = image_utils.xcorr(cap_rotated_template_arr, filled[min_y:max_y, min_x:max_x], np.array([int((max_y-min_y)/2), int((max_x-min_x)/2)]), search_area)
+    xcorrs = image_utils.xcorr(cap_rotated_template_arr, binary[min_y:max_y, min_x:max_x], np.array([int((max_y-min_y)/2), int((max_x-min_x)/2)]), search_area)
     cap_diff = np.unravel_index(np.argmax(xcorrs), xcorrs.shape) - np.array([search_area/2, search_area/2])
     cap_diff = cap_diff[::-1]
     cap_translations[i] = [cap_diff[0], cap_diff[1]]
+
+    # Flood fill algorithm to find breaks
+    for j, pt in enumerate(cap_seed_locs):
+        new_pt = geo.rotate_point(pt, seed_angs[j], scaling/microns_per_pixel_x,
+                                  scaling/microns_per_pixel_y, (xx, yy))
+        new_pt = np.round(new_pt + diff + cap_diff)
+        new_pt = np.array(new_pt, dtype=int)
+        seed_image_locs.append((new_pt[0], new_pt[1]))
+    filled = segmentation.flood_fill(new_skel, seed_image_locs[0][::-1], True, connectivity=1)
+    half_filled = [deepcopy(filled)]
+    half_filled.append(segmentation.flood_fill(new_skel, seed_image_locs[1][::-1], True, connectivity=1))
+    segmentation.flood_fill(filled, seed_image_locs[1][::-1], True, connectivity=1, in_place=True)
 
     # now do flood fill accounting again with the adjusted template location
     cap_rotated_template_arr = np.zeros(image.shape)
