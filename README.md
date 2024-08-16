@@ -4,13 +4,13 @@ This repository contains code designed to analyze optical images of cryogenic SP
 NOTE: This is the public version of this repository. Because the code deals with proprietary hardware designs, certain auxillary files containing this design info have been omitted, as well as certain auxillary scripts that were written to convert the data into the format expected by the main scripts described below. Without these (as well as the actual detector images), the main scripts are not exactly runnable; this public-facing version is meant simply as a demonstration of some of the methods I've implemented.
 
 ## SPT-3G TES bolometers
-The code for this detector geometry lives in the top-level directory. The main scripts to be aware of are:
+The code for this detector geometry lives in the `tes_analysis` sub-directory. The main scripts to be aware of are:
 * `image_features.py`, which takes detector images as an input and returns as an output information on the detectors such as their area and perimeter, surface roughness, etc.
 * `do_machine_learning_<classification/regression>.py`, which takes the visual and cryogenic features as inputs and saves out a pickle file of the relevant ML outputs.
 Beyond this there are a number of auxillary scripts to reformat data in the way the ML scripts expect it, to turn detector design GDS files into usable pickle data products, to plot figures, etc.
 
 ## SPT-3G+ MKIDs
-This code all lives in the `spt4` sub-directory (though it occasionally imports modules that live in the top-level directory). This iteration of the project dropped the ML in favor of predicting cryogenic performance straight from the images themselves. Two main scripts to be aware of:
+This code all lives in the `mkid_analysis` sub-directory (though it occasionally imports modules that live in the top-level directory). This iteration of the project dropped the ML in favor of predicting cryogenic performance straight from the images themselves. Two main scripts to be aware of:
 * `stitch_images.py`, which takes the individual image tiles direct from the microscope and stitches them together into one single image. Stitching is necessary to capture the entire area of the detector while keeping a high enough resolution to actually perform our analysis.
   * NOTE: This nominally makes use of the external package `m2stitch`, a Python implementation of the MIST stitching algorithm. For our particular detector geometry, the default MIST algorithm led to occasional stitching errors, so I made some modifications. You can find my public fork of `m2stitch` [here](https://github.com/kferguson42/m2stitch_fork).
 * `analyze_mkid_pixel.py`, which does the main image analysis. It determines the location and orientation of the detectors in the image, searches for defects using a flood fill algorithm, and measures the width of the detector conducting lines, all while generating plots about what it finds.
